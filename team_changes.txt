@@ -1,0 +1,55 @@
+As a team, we expanded the program into a full interactive video capture and image processing system by adding new structures, helper functions, and processing logic. We introduced a mode-based control flow using  
+
+int mode = 0;
+mode++;
+
+to cycle through different behaviors on each button press. We added software frame buffers to store and manipulate images:  
+
+uint16_t frame[240][320];
+uint16_t temp[240][320];
+
+We implemented VGA text support using:
+
+void VGA_text(volatile uint8_t *buf, int x, int y, const char *text)
+
+and
+
+void VGA_clear(volatile uint8_t *buf)
+
+which allowed us to display messages like timestamps and capture counts:
+
+time_t now = time(NULL);
+strftime(timestamp, sizeof(timestamp), "Timestamp: %Y-%m-%d %H:%M:%S", localtime(&now));
+VGA_text(Char_buf_ptr, 2, 2, timestamp);
+
+sprintf(text, "Captured frame count: %d", capture_count);
+
+We captured frames into memory using:
+
+frame[y][x] = Video_Mem_ptr[(y << 9) + x];
+
+and applied multiple image processing operations, such as horizontal flip:
+
+temp[y][x] = frame[y][319-x];
+
+vertical flip:
+
+temp[y][x] = frame[239-y][x];
+
+threshold black/white conversion:
+
+uint16_t r = (pixel >> 11) & 0x1F;
+uint16_t g = (pixel >> 5) & 0x3F;
+uint16_t b = pixel & 0x1F;
+uint16_t gray = (r + g + b) / 3;
+if (gray > 10) frame[y][x] = 0xFFFF;
+else frame[y][x] = 0x0000;
+
+and an additional invert filter:
+
+frame[y][x] = ~frame[y][x];
+
+Finally, we wrote processed images back using:
+
+Video_Mem_ptr[y * VIDEO_STRIDE + x] = frame[y][x];
+
