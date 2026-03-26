@@ -41,6 +41,11 @@
 #define PAGE_SIZE 4096UL
 #define PAGE_MASK (~(PAGE_SIZE - 1))
 
+#define VIDEO_STRIDE 512 
+#define IMG_WIDTH 320
+#define IMG_HEIGHT 240
+#define STRIDE 128
+
 /* ============================================================================
  *  Memory Mapping Helper
  * ========================================================================== */
@@ -59,7 +64,7 @@ static void *map_span(int fd, off_t phys_addr, size_t span_bytes)
 
     if (v == MAP_FAILED)
         return NULL;
-
+ 
     return (uint8_t *)v + off;
 }
 
@@ -79,6 +84,28 @@ static volatile uint8_t *map8_span(int fd, off_t phys_addr, size_t span)
 }
 
 
+// Writes a string to the VGA character buffer
+void VGA_text(volatile uint8_t *buf, int x, int y, const char *text)
+
+{int i = 0;
+
+    while (text[i] != '\0')
+
+    {buf[y * STRIDE + x + i] = text[i];
+
+        i++;}}
+
+// Clears the VGA character buffer
+void VGA_clear(volatile uint8_t *buf)
+
+{int x,y;
+
+    for ( y = 0; y < 60; y++) 
+
+    {for ( x = 0; x < STRIDE; x++) 
+
+        {buf[y * STRIDE + x] = ' ';}}}
+
 /* ============================================================================
  *  Main
  *  When you run this code without any changes
@@ -87,36 +114,51 @@ static volatile uint8_t *map8_span(int fd, off_t phys_addr, size_t span)
  *  - second button press should exit the program
  * ========================================================================== */
 
+ // Setting up a global mode variable
+
+
 int main(void)
-{
-    printf("Opening /dev/mem...\n");
+
+{printf("Opening /dev/mem...\n");
 
     int fd = open("/dev/mem", O_RDWR | O_SYNC);
-    if (fd < 0) {
-        perror("open(/dev/mem)");
-        return 1;
-    }
+
+    if (fd < 0) 
+
+    {perror("open(/dev/mem)");
+
+        return 1;}
 
     /* Map hardware regions */
 
     volatile uint32_t *KEY_ptr =
+
         map32(fd, KEY_BASE);
 
     volatile uint32_t *VID_reg3 =
+
         map32(fd, VIDEO_IN_BASE + 0xC);
 
     volatile uint16_t *Video_Mem_ptr =
+
         map16_span(fd, FPGA_ONCHIP_BASE,
+
                    512 * 240 * 2);  // stride 512, 240 rows
 
     volatile uint8_t *Char_buf_ptr =
+
         map8_span(fd, FPGA_CHAR_BASE,
+
                   128 * 60);
 
     if (!KEY_ptr || !VID_reg3 ||
+
         !Video_Mem_ptr || !Char_buf_ptr) {
+
         perror("mmap failed");
+
         close(fd);
+
         return 1;
     }
 
@@ -126,6 +168,14 @@ int main(void)
     *VID_reg3 = 0x4;
 
     int capture_count = 0;
+
+    int mode = 0; // 0: video streaming, 1: capture + timestamp, 2: video streaming, 3: capture + processing, 4: video streaming
+
+    uint16_t frame[240][320];
+
+    uint16_t temp[240][320]; 
+
+    char text[256];
 
     /* ============================================================
      * TODO 1:
@@ -141,27 +191,56 @@ int main(void)
      *     - 5. fourth button press, enables video stream on to monitor again and so on..........
      * ============================================================ */
 
-    while (1)
+     while (1)
     {
         
+        if (*KEY_ptr != 0)                  // check if any KEY was pressed
+        {
+
+            while (*KEY_ptr != 0);  
+            
+            mode++; // wait for pushbutton KEY release
+
+
+            if (mode == 1) 
+               {*VID_reg3 = 0x0; // stop video stream
+
+                int x,y;
+                for (y = 0; y < IMG_HEIGHT; y++)
+
+                {for (x=0; x < IMG_WIDTH; x++) {frame [y][x] = Video_Mem_ptr[(y << 9) + x];}}
+
+                VGA_clear(Char_buf_ptr); // capture frame and display timestamp
+
+                time_t now = time(NULL);
+
+                char timestamp[64];
+
+                strftime(timestamp, sizeof(timestamp), "Timestamp: %Y-%m-%d %H:%M:%S", localtime(&now));
+
+                VGA_text(Char_buf_ptr, 2, 2, timestamp);} // Display timestamp on VGA
+
+            else if (mode == 2) 
+
+            {VGA_clear(Char_buf_ptr); // enable video stream
+
+                *VID_reg3 = 0x4;} // enable video stream
+
+            else if (mode == 3) 
+
+            {   *VID_reg3 = 0x0; // stop video stream
+
+                VGA_clear(Char_buf_ptr); // capture frame
+
+                capture_count++;
+
+                sprintf(text, "Captured frame count: %d", capture_count);
+                
+                VGA_text(Char_buf_ptr, 0, 0, text); // Display captured frame count on VGA
+            
+
+    
         
-	    if (*KEY_ptr != 0)						// check if any KEY was pressed
-	    {
-		   *(VID_reg3) = 0x0;			    // Disable the video to capture one frame
-		   while (*KEY_ptr != 0);				// wait for pushbutton KEY release
-		   break;
-	    }
-
-	}
-
-    while (1)
-	{
-		if (*KEY_ptr != 0)						// check if any KEY was pressed
-		{
-			break;
-		}
-	}
-	    
     /* ============================================================
      * TODO 2:
      *   Capture a 320x240 frame from FPGA video memory into
@@ -176,14 +255,95 @@ int main(void)
      *     - below code gives a sample code about how to read memory pixel by pixel
      *     - it is suggested to save each pixel value in to a image frame, to to each image processing task
      * ============================================================ */
-    int x,y;
-    for (y = 0; y < 240; y++) {
-        for (x = 0; x < 320; x++) {
-            short temp2 = Video_Mem_ptr[(y << 9) + x];
-            *(Video_Mem_ptr + (y << 9) + x) = temp2;
-        }
-    }
-    
+
+                int x,y;
+
+                for (y=0; y< 240; y++) 
+
+                {for (x=0; x <320; x++) 
+                    {frame [y][x] = Video_Mem_ptr[(y << 9) + x];}}}
+
+
+            else if (mode == 4)
+
+            {VGA_clear(Char_buf_ptr); // capture frame and display timestamp
+
+                *VID_reg3 = 0x4;} // enable video stream
+            
+            else if (mode == 5) 
+
+            {*VID_reg3 = 0x0; // stop video stream
+
+            VGA_clear(Char_buf_ptr); // capture frame
+
+            VGA_text(Char_buf_ptr, 0, 0, "Horizontal Flip"); // Display captured frame count on VGA
+                
+                int x,y;
+
+                for (y=0; y< 240; y++) 
+
+                    {for (x=0; x <320; x++) {frame[y][x] = Video_Mem_ptr[(y << 9) + x];}}
+
+                for (y=0; y< 240; y++) 
+
+                    {for (x=0; x <320; x++)
+
+                        {temp[y][x] = frame[y][319-x];}} // Horizontal flip
+                   
+
+                for (y=0; y< 240; y++) 
+
+                {for (x=0; x <320; x++) 
+
+                {Video_Mem_ptr[y * VIDEO_STRIDE + x] = temp[y][x];}}} // Write back to memory
+                
+
+            else if (mode == 6) 
+
+            {*VID_reg3 = 0x0; // stop video stream
+
+            VGA_clear(Char_buf_ptr); // capture frame
+
+            VGA_text(Char_buf_ptr, 0, 0, "Vertical Flip"); // Display captured frame count on VGA
+                
+                int x,y;
+
+                for (y=0; y< 240; y++) 
+
+                    {for (x=0; x <320; x++) 
+
+                        {frame[y][x] = Video_Mem_ptr[(y << 9) + x];}}
+
+                for (y=0; y< 240; y++) 
+
+                {for (x=0; x <320; x++) 
+
+                    {temp[y][x] = frame[239-y][x];}} // Vertical flip
+
+
+                for (y=0; y< 240; y++) 
+
+                {for (x=0; x <320; x++) 
+
+                    {Video_Mem_ptr[y * VIDEO_STRIDE + x] = temp[y][x];}}} // Write back to memory
+
+            else if (mode == 7) 
+
+            {*VID_reg3 = 0x0; // stop video stream
+
+            VGA_clear(Char_buf_ptr); // capture frame
+
+            VGA_text(Char_buf_ptr, 0, 0, "Black and White");
+
+                int x,y;
+
+                for (y=0; y< 240; y++) 
+
+                {for (x=0; x <320; x++) 
+                    
+                    {frame[y][x] = Video_Mem_ptr[(y << 9) + x];}}   
+
+
     /* ============================================================
      * TODO 3:
      *  Write a function that prints a string to VGA character 
@@ -197,6 +357,8 @@ int main(void)
      *    - Each character = 1 byte (ASCII)
      * ============================================================ */
 
+    // Done in the VGA_text() function above
+
     /* ============================================================
      * TODO 4:
      *   Implement at least THREE image processing operations:
@@ -209,8 +371,67 @@ int main(void)
      *
      * ============================================================ */
 
-    
+                
+                // Threshold-based black/white
+                for (y=0; y< 240; y++) {
+                    for (x=0; x <320; x++) {
+
+                        uint16_t pixel = frame[y][x];
+
+                        uint16_t r = (pixel >> 11) & 0x1F; // Extract red
+
+                        uint16_t g = (pixel >> 5) & 0x3F;  // Extract green
+
+                        uint16_t b = pixel & 0x1F;         // Extract blue
+
+                        uint16_t gray = (r + g + b) / 3; // Simple average for grayscale
+                        
+                        if (gray > 10) 
+                         
+                            {frame[y][x] = 0xFFFF;} // White
+
+                        else 
+
+                            {frame[y][x] = 0x0000;} // Black
+
+
+                        
+                        Video_Mem_ptr[y * VIDEO_STRIDE + x] = frame[y][x];}}} // frame back to memory
+
+            else if (mode == 8)
+            
+                {*VID_reg3 = 0x0;
+
+                VGA_clear(Char_buf_ptr); // capture frame
+
+                VGA_text(Char_buf_ptr, 0, 0, "Invert");
+
+                int x,y;
+
+                for (y=0; y< 240; y++) 
+                
+                    {for (x=0; x <320; x++) 
+
+                        {frame[y][x] = Video_Mem_ptr[(y << 9) + x];}}
+
+                for (y=0; y< 240; y++) 
+
+                    {for (x=0; x <320; x++) 
+
+                        {frame[y][x] = ~frame[y][x]; // Invert colors
+
+                        Video_Mem_ptr[y * VIDEO_STRIDE + x] = frame[y][x];}}} // Write back to memory
+
+
+            else if (mode == 9) 
+            
+                {VGA_clear(Char_buf_ptr); // enable video stream
+
+                *VID_reg3 = 0x4; // enable video stream
+
+                mode = 0;}}} // reset mode to start over
 
     close(fd);
+
     return 0;
 }
